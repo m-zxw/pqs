@@ -17,11 +17,9 @@ def get_shift(hour):
     else: return 'C'
 
 def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayfirst_output, is_12hr):
-    # Matches timestamp patterns reliably across Android, iPhone [], and formats including seconds
     timestamp_pattern = r'\[?(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:[:\.]\d{2})?(?:\s*[\u202f\u200e\s]*[APap][Mm])?)\]?'
     message_splits = re.split(timestamp_pattern, text_content)
 
-    # RAW TEXT FALLBACK: If there are no WhatsApp timestamps, split by "Heat No:"
     if len(message_splits) < 3:
         fallback_splits = re.split(r'(?:Heat No:|Heat #)[\s]*', text_content, flags=re.IGNORECASE)
         message_splits = [""]
@@ -38,8 +36,14 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
         "Flow Rate m3", "FCV%", "CE", "After WHF Temp.", "WHF Exit Temp At Stand 1 Entry", 
         "Bar Temp. Before PQS", "Bar Temp at Cooling Bed", "PQS Water Temperature"
     ]
+    
+    # These are the actual metrics. If a message has NONE of these, it's a random chat message and gets deleted.
+    core_metrics = [
+        "Heat#", "Size", "Size Details", "Billet Qty", "PQS Carriage", "P1", "P2", "P3", "P4", "P5", "P6", 
+        "Pumps in Operation", "Mill Speed m/s", "Flow Rate m3", "FCV%", "CE", "After WHF Temp.", 
+        "WHF Exit Temp At Stand 1 Entry", "Bar Temp. Before PQS", "Bar Temp at Cooling Bed", "PQS Water Temperature"
+    ]
 
-    # Supercharged Number Extractor (Now handles typos like 10:00 for 10.00)
     def get_num(keyword, text):
         m = re.search(rf'{keyword}[^\d\n]*(\d+(?:[\.\:]\d+)?)', text, re.IGNORECASE)
         return m.group(1).replace(':', '.') if m else ""
@@ -54,7 +58,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             msg_ts = parser.parse(ts_str, fuzzy=True, dayfirst=is_dayfirst_input)
             row = {k: "" for k in keys_list}
             
-            # --- Apply Custom Formatting ---
             if is_12hr:
                 row["Time"] = msg_ts.strftime("%I:%M %p")
             else:
@@ -69,7 +72,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             row["_dt_obj"] = msg_ts.date()
             row["_raw_dt"] = msg_ts
             
-            # --- Sender Extraction ---
             sender = "Unknown Number"
             s_match = re.search(r'^(?:\]|,|-)?\s*([^:\n🚨]+):', record)
             if s_match: sender = s_match.group(1).strip()
@@ -77,7 +79,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             if sender in sender_mapping: sender = sender_mapping[sender]
             row["Shared By"] = sender
 
-            # --- Resilient Quantities Logic (Now supports "7th billete", "1 bullet") ---
             b_match = re.search(r'(\d+)(?:st|nd|rd|th)?\s*(?:billet|bullet|bilet|billete)', text_lower)
             if not b_match:
                 b_match = re.search(r'(?:billet|bullet|bilet|billete)[^\d\n]*(\d+)', text_lower)
@@ -86,7 +87,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             row["Heat#"] = get_num(r'heat', record)
             row["Billet Qty"] = billets if billets > 0 else ""
 
-            # --- Sizes & Labels Extraction ---
             row["Size"] = get_num(r'size', record)
             
             sd_match = re.search(r'\(\s*([a-zA-Z\s]+)\s*\)', record[:150])
@@ -95,7 +95,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
                 if val.lower() not in ['bar', 'c', 'mm']:
                     row["Size Details"] = val.title()
             
-            # --- PQS Metrics Extraction (Now supports "Fliw" and "Follow") ---
             row["Mill Speed m/s"] = get_num(r'sp[e]{1,2}d', record)
             row["Flow Rate m3"] = get_num(r'(?:fl[o]{1,2}w|f[o]{1,2}ll[o]{1,2}w|fl[i]{1,2}w|follow)', record)
             row["FCV%"] = get_num(r'fcv', record)
@@ -113,14 +112,12 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             if pump_match:
                 row["Pumps in Operation"] = pump_match.group(1).strip()
 
-            # --- Resilient Temperatures Extraction ---
             row["After WHF Temp."] = get_num(r'(?:after|afr)\s*whf', record)
             row["WHF Exit Temp At Stand 1 Entry"] = get_num(r'(?:stand|stnd|stad)\s*1', record)
             row["Bar Temp. Before PQS"] = get_num(r'before\s*pqs', record)
             row["Bar Temp at Cooling Bed"] = get_num(r'(?:cooling|coling|c\.?b\.?)', record)
             row["PQS Water Temperature"] = get_num(r'(?:water|watr)\s*temp', record)
 
-            # --- Dynamic Pressure Logic (Naked Number Vertical Fallback added) ---
             found_labeled = False
             for p_idx in range(1, 7):
                 p_match = re.search(rf'(?:\*|\b){p_idx}\s*#\s*\*?\s*(?:->|\u2192|→|:)*\s*(\d+(?:\.\d+)?)', record, re.IGNORECASE)
@@ -128,7 +125,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
                     row[f"P{p_idx}"] = p_match.group(1)
                     found_labeled = True
 
-            # If pressure labels (1#) are missing, it perfectly maps vertical numbers (4, 4, 12, 12)
             if not found_labeled:
                 naked_nums = []
                 for line in record.split('\n'):
@@ -140,7 +136,9 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
                     for p_idx, val in enumerate(naked_nums):
                         row[f"P{p_idx+1}"] = val
 
-            all_data.append(row)
+            # TRASH FILTER: Only append the row if it contains actual quenching parameters
+            if any(row[k] != "" for k in core_metrics):
+                all_data.append(row)
 
         except Exception:
             continue
@@ -227,11 +225,11 @@ if uploaded_file is not None:
 
     content = uploaded_file.read().decode("utf-8", errors="ignore")
     
-    with st.spinner('Parsing logs...'):
+    with st.spinner('Filtering logs & extracting data...'):
         result_df = load_data(content, sender_dict, user_is_dayfirst_input, user_is_dayfirst_output, user_is_12hr)
         
     if result_df.empty:
-        st.warning("No records found in the log file.")
+        st.warning("No quenching records found in the log file.")
     else:
         st.divider()
         st.subheader("⏳ Filter & Arrangement Controls")
@@ -296,7 +294,7 @@ if uploaded_file is not None:
         if '_raw_dt' in display_df.columns:
             display_df = display_df.drop(columns=['_raw_dt'])
             
-        st.success(f"Showing {len(display_df)} records matching filters!")
+        st.success(f"Showing {len(display_df)} clean records matching filters!")
         st.dataframe(display_df, use_container_width=True)
         
         st.divider()
