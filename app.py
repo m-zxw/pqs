@@ -17,12 +17,11 @@ def get_shift(hour):
     else: return 'C'
 
 def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayfirst_output, is_12hr):
-    # Matches timestamp pattern including alternative whitespace/narrow characters like \u202f or \u200e before AM/PM
-    timestamp_pattern = r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:[\s\u202f\u200e]*[APap][Mm]|\s* [APap][Mm])?)'
+    # Matches timestamp patterns reliably across different device exports
+    timestamp_pattern = r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:\s*[\u202f\u200e\s]*[APap][Mm])?)'
     message_splits = re.split(timestamp_pattern, text_content)
 
     all_data = []
-    current_sample_no = 1
     
     keys_list = [
         "Sample No.", "Heat#", "Size", "Size Details", "Billet Qty", "Shift", "Shared By", "Time", "Date", 
@@ -42,7 +41,7 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
         text_lower = record.lower()
         
         try:
-            # Bulletproof Date Parsing using the customizable UI sidebar parameters
+            # Parse full datetime object
             msg_ts = parser.parse(ts_str, fuzzy=True, dayfirst=is_dayfirst_input)
 
             row = {k: "" for k in keys_list}
@@ -60,8 +59,9 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
                 
             row["Shift"] = get_shift(msg_ts.hour)
             
-            # Hidden tracking field for seamless cross-regional dynamic sorting/filtering
+            # Hidden fields for accurate sorting and filtering
             row["_dt_obj"] = msg_ts.date()
+            row["_raw_dt"] = msg_ts
             
             # --- Sender Extraction ---
             sender = "Unknown Number"
@@ -79,9 +79,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             
             row["Heat#"] = get_num(r'heat', record)
             row["Billet Qty"] = billets if billets > 0 else ""
-            row["Sample No."] = current_sample_no
-            
-            if billets > 0: current_sample_no += billets
 
             # --- Sizes & Labels Extraction ---
             row["Size"] = get_num(r'size', record)
@@ -145,11 +142,9 @@ st.title("🔥 Quenching Parameters Extractor")
 st.markdown("Upload your WhatsApp chat export to instantly convert raw texts into structured datasets.")
 
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("⚙️ System Configuration")
     
-    # FORMAT CONTROL HUB
-    st.subheader("📅 Date & Time Formats")
-    
+    st.subheader("📅 Date & Time Hardware Formats")
     st.markdown("**1. How does the uploaded phone export dates?**")
     input_date_format = st.radio(
         "Parser Reading Format:",
@@ -227,44 +222,82 @@ if uploaded_file is not None:
     if result_df.empty:
         st.warning("No records found in the log file.")
     else:
+        st.divider()
+        st.subheader("⏳ Filter & Arrangement Controls")
+        
+        # FIXED: Control parameters brought completely outside the sidebar panel
         min_date = result_df['_dt_obj'].min()
         max_date = result_df['_dt_obj'].max()
         
-        st.sidebar.divider()
-        st.sidebar.subheader("⏳ Filter by Date Range")
-        if min_date == max_date:
-            selected_date = st.sidebar.date_input("Logs Date Found", value=min_date)
-            filtered_df = result_df[result_df['_dt_obj'] == selected_date]
-        else:
-            selected_range = st.sidebar.date_input(
-                "Select Date Window",
-                value=(min_date, max_date),
-                min_value=min_date,
-                max_value=max_date
-            )
-            if isinstance(selected_range, tuple) and len(selected_range) == 2:
-                s_date, e_date = selected_range
-                filtered_df = result_df[(result_df['_dt_obj'] >= s_date) & (result_df['_dt_obj'] <= e_date)]
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if min_date == max_date:
+                selected_date = st.date_input("Logs Date Found", value=min_date)
+                filtered_df = result_df[result_df['_dt_obj'] == selected_date]
             else:
-                filtered_df = result_df
-        
-        available_shifts = sorted(filtered_df['Shift'].unique().tolist())
-        selected_shifts = st.sidebar.multiselect("Filter by Shift(s)", available_shifts, default=available_shifts)
-        
-        final_df = filtered_df[filtered_df['Shift'].isin(selected_shifts)].copy()
-        
-        # Clean up hidden datetime index before output rendering
-        if '_dt_obj' in final_df.columns:
-            final_df = final_df.drop(columns=['_dt_obj'])
+                selected_range = st.date_input(
+                    "Select Date Window",
+                    value=(min_date, max_date),
+                    min_value=min_date,
+                    max_value=max_date
+                )
+                if isinstance(selected_range, tuple) and len(selected_range) == 2:
+                    s_date, e_date = selected_range
+                    filtered_df = result_df[(result_df['_dt_obj'] >= s_date) & (result_df['_dt_obj'] <= e_date)]
+                else:
+                    filtered_df = result_df
+                    
+        with col2:
+            available_shifts = sorted(result_df['Shift'].unique().tolist())
+            selected_shifts = st.multiselect("Filter by Shift(s)", available_shifts, default=available_shifts)
+            filtered_df = filtered_df[filtered_df['Shift'].isin(selected_shifts)]
             
-        st.success(f"Showing {len(final_df)} records matching filters!")
-        st.dataframe(final_df, use_container_width=True)
+        with col3:
+            sort_order = st.selectbox(
+                "Table Arrangement Order:", 
+                options=["Oldest First (Chronological)", "Newest First (Reverse Chronological)"], 
+                index=0
+            )
+
+        # FIXED: Core sequential processing engine sorted strictly by actual datetime objects
+        df_chrono = filtered_df.sort_values('_raw_dt', ascending=True).reset_index(drop=True)
+        
+        # FIXED: Sample tracking recalculates starting from 1 sequentially relative only to filtered criteria
+        current_sample_no = 1
+        sample_nos = []
+        for idx, row in df_chrono.iterrows():
+            sample_nos.append(current_sample_no)
+            qty = row['Billet Qty']
+            try:
+                if qty != "" and int(qty) > 0:
+                    current_sample_no += int(qty)
+            except ValueError:
+                pass
+                
+        df_chrono['Sample No.'] = sample_nos
+        
+        # Apply the chosen visual data matrix layout mapping
+        if "Oldest First" in sort_order:
+            final_df = df_chrono
+        else:
+            final_df = df_chrono.iloc[::-1].reset_index(drop=True)
+            
+        # Strip out the hidden datetime tracking keys before rendering metrics layout
+        display_df = final_df.copy()
+        if '_dt_obj' in display_df.columns:
+            display_df = display_df.drop(columns=['_dt_obj'])
+        if '_raw_dt' in display_df.columns:
+            display_df = display_df.drop(columns=['_raw_dt'])
+            
+        st.success(f"Showing {len(display_df)} records matching filters!")
+        st.dataframe(display_df, use_container_width=True)
         
         st.divider()
-        st.subheader("💾 Export Data")
+        st.subheader("💾 Export Structured Data")
         
         buffer = io.BytesIO()
-        final_df.to_excel(buffer, index=False)
+        display_df.to_excel(buffer, index=False)
         st.download_button(
             label="📥 Download as Excel (.xlsx)",
             data=buffer.getvalue(),
