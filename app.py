@@ -17,22 +17,32 @@ def get_shift(hour):
     else: return 'C'
 
 def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayfirst_output, is_12hr):
-    # Matches timestamp patterns reliably across different device exports
-    timestamp_pattern = r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:\s*[\u202f\u200e\s]*[APap][Mm])?)'
+    # Matches timestamp patterns reliably across Android, iPhone [], and formats including seconds
+    timestamp_pattern = r'\[?(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:[:\.]\d{2})?(?:\s*[\u202f\u200e\s]*[APap][Mm])?)\]?'
     message_splits = re.split(timestamp_pattern, text_content)
+
+    # RAW TEXT FALLBACK: If there are no WhatsApp timestamps, split by "Heat No:"
+    if len(message_splits) < 3:
+        fallback_splits = re.split(r'(?:Heat No:|Heat #)[\s]*', text_content, flags=re.IGNORECASE)
+        message_splits = [""]
+        fake_time = "12/12/2024 12:00 PM"
+        for f_block in fallback_splits[1:]:
+            message_splits.append(fake_time)
+            message_splits.append("Heat No: " + f_block)
 
     all_data = []
     
     keys_list = [
         "Sample No.", "Heat#", "Size", "Size Details", "Billet Qty", "Shift", "Shared By", "Time", "Date", 
         "PQS Carriage", "P1", "P2", "P3", "P4", "P5", "P6", "Pumps in Operation", "Mill Speed m/s", 
-        "Flow Rate m3", "FCV%", "After WHF Temp.", "WHF Exit Temp At Stand 1 Entry", 
+        "Flow Rate m3", "FCV%", "CE", "After WHF Temp.", "WHF Exit Temp At Stand 1 Entry", 
         "Bar Temp. Before PQS", "Bar Temp at Cooling Bed", "PQS Water Temperature"
     ]
 
+    # Supercharged Number Extractor (Now handles typos like 10:00 for 10.00)
     def get_num(keyword, text):
-        m = re.search(rf'{keyword}[^\d\n]*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
-        return m.group(1) if m else ""
+        m = re.search(rf'{keyword}[^\d\n]*(\d+(?:[\.\:]\d+)?)', text, re.IGNORECASE)
+        return m.group(1).replace(':', '.') if m else ""
 
     for i in range(1, len(message_splits), 2):
         ts_str = message_splits[i].strip()
@@ -41,9 +51,7 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
         text_lower = record.lower()
         
         try:
-            # Parse full datetime object
             msg_ts = parser.parse(ts_str, fuzzy=True, dayfirst=is_dayfirst_input)
-
             row = {k: "" for k in keys_list}
             
             # --- Apply Custom Formatting ---
@@ -58,21 +66,19 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
                 row["Date"] = msg_ts.strftime("%m/%d/%Y")
                 
             row["Shift"] = get_shift(msg_ts.hour)
-            
-            # Hidden fields for accurate sorting and filtering
             row["_dt_obj"] = msg_ts.date()
             row["_raw_dt"] = msg_ts
             
             # --- Sender Extraction ---
             sender = "Unknown Number"
-            s_match = re.search(r'(?:\]|,|-)\s*([^:\n🚨]+):', record)
+            s_match = re.search(r'^(?:\]|,|-)?\s*([^:\n🚨]+):', record)
             if s_match: sender = s_match.group(1).strip()
             sender = sender.replace('[', '').replace(']', '').strip()
             if sender in sender_mapping: sender = sender_mapping[sender]
             row["Shared By"] = sender
 
-            # --- Resilient Quantities Logic ---
-            b_match = re.search(r'(\d+)\s*(?:billet|bullet|bilet|billete)', text_lower)
+            # --- Resilient Quantities Logic (Now supports "7th billete", "1 bullet") ---
+            b_match = re.search(r'(\d+)(?:st|nd|rd|th)?\s*(?:billet|bullet|bilet|billete)', text_lower)
             if not b_match:
                 b_match = re.search(r'(?:billet|bullet|bilet|billete)[^\d\n]*(\d+)', text_lower)
             billets = int(b_match.group(1)) if b_match else 0
@@ -89,10 +95,14 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
                 if val.lower() not in ['bar', 'c', 'mm']:
                     row["Size Details"] = val.title()
             
-            # --- PQS Metrics Extraction ---
+            # --- PQS Metrics Extraction (Now supports "Fliw" and "Follow") ---
             row["Mill Speed m/s"] = get_num(r'sp[e]{1,2}d', record)
             row["Flow Rate m3"] = get_num(r'(?:fl[o]{1,2}w|f[o]{1,2}ll[o]{1,2}w|fl[i]{1,2}w|follow)', record)
             row["FCV%"] = get_num(r'fcv', record)
+            
+            ce_match = re.search(r'c\.?e\.?[\s:]*(semi\s*hot[\s\w]*|cold|\d+(?:\.\d*)?)', record, re.IGNORECASE)
+            if ce_match:
+                row["CE"] = ce_match.group(1).strip().title()
             
             carriage_match = re.search(r'carriage[\s:,\-\.#=]*([^\n]+)', record, re.IGNORECASE)
             if carriage_match:
@@ -110,7 +120,7 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             row["Bar Temp at Cooling Bed"] = get_num(r'(?:cooling|coling|c\.?b\.?)', record)
             row["PQS Water Temperature"] = get_num(r'(?:water|watr)\s*temp', record)
 
-            # --- Dynamic Pressure Logic ---
+            # --- Dynamic Pressure Logic (Naked Number Vertical Fallback added) ---
             found_labeled = False
             for p_idx in range(1, 7):
                 p_match = re.search(rf'(?:\*|\b){p_idx}\s*#\s*\*?\s*(?:->|\u2192|→|:)*\s*(\d+(?:\.\d+)?)', record, re.IGNORECASE)
@@ -118,12 +128,13 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
                     row[f"P{p_idx}"] = p_match.group(1)
                     found_labeled = True
 
+            # If pressure labels (1#) are missing, it perfectly maps vertical numbers (4, 4, 12, 12)
             if not found_labeled:
                 naked_nums = []
                 for line in record.split('\n'):
                     cln = line.strip()
                     if re.match(r'^[\s]*(\d+(?:\.\d+)?)[\s]*$', cln):
-                        naked_nums.append(cln.strip())
+                        naked_nums.append(cln)
                 
                 if 0 < len(naked_nums) <= 6:
                     for p_idx, val in enumerate(naked_nums):
@@ -225,7 +236,6 @@ if uploaded_file is not None:
         st.divider()
         st.subheader("⏳ Filter & Arrangement Controls")
         
-        # FIXED: Control parameters brought completely outside the sidebar panel
         min_date = result_df['_dt_obj'].min()
         max_date = result_df['_dt_obj'].max()
         
@@ -260,10 +270,8 @@ if uploaded_file is not None:
                 index=0
             )
 
-        # FIXED: Core sequential processing engine sorted strictly by actual datetime objects
         df_chrono = filtered_df.sort_values('_raw_dt', ascending=True).reset_index(drop=True)
         
-        # FIXED: Sample tracking recalculates starting from 1 sequentially relative only to filtered criteria
         current_sample_no = 1
         sample_nos = []
         for idx, row in df_chrono.iterrows():
@@ -277,13 +285,11 @@ if uploaded_file is not None:
                 
         df_chrono['Sample No.'] = sample_nos
         
-        # Apply the chosen visual data matrix layout mapping
         if "Oldest First" in sort_order:
             final_df = df_chrono
         else:
             final_df = df_chrono.iloc[::-1].reset_index(drop=True)
             
-        # Strip out the hidden datetime tracking keys before rendering metrics layout
         display_df = final_df.copy()
         if '_dt_obj' in display_df.columns:
             display_df = display_df.drop(columns=['_dt_obj'])
