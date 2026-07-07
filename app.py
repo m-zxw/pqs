@@ -18,17 +18,14 @@ def is_genuine_quenching_message(text_content):
     """
     txt_lower = text_content.lower()
     
-    # Immediately drop obvious WhatsApp noise/media lines
     if "media omitted" in txt_lower or "file attached" in txt_lower or "sticker omitted" in txt_lower:
         return False
         
-    # Check for core functional keywords
     has_heat = bool(re.search(r'heat', txt_lower))
     has_billet = bool(re.search(r'billet|bullet|bilet|billete', txt_lower))
     has_pqs_metrics = bool(re.search(r'pqs|fcv|flow|fliw|follow|speed|temp|carriage|pump|bar\s*temp', txt_lower))
     has_numbers = bool(re.search(r'\d', txt_lower))
     
-    # To be a real entry, it must have numbers and either say 'Heat' or combine billet/PQS keywords
     if has_heat and has_numbers:
         return True
     if has_billet and (has_pqs_metrics or has_numbers):
@@ -44,11 +41,9 @@ def get_shift(hour):
     else: return 'C'
 
 def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayfirst_output, is_12hr):
-    # Matches timestamp patterns reliably across Android and iOS exports
     timestamp_pattern = r'\[?(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:,?\s+|\s+)\d{1,2}[:\.]\d{2}(?:[:\.]\d{2})?(?:\s*[\u202f\u200e\s]*[APap][Mm])?)\]?'
     message_splits = re.split(timestamp_pattern, text_content)
 
-    # RAW TEXT FALLBACK
     if len(message_splits) < 3:
         fallback_splits = re.split(r'(?:Heat No:|Heat #)[\s]*', text_content, flags=re.IGNORECASE)
         message_splits = [""]
@@ -74,7 +69,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
         ts_str = message_splits[i].strip()
         record = message_splits[i+1].replace('<This message was edited>', '').replace('*', '').strip()
         
-        # Apply the explicit structural firewall check here
         if not is_genuine_quenching_message(record):
             continue
 
@@ -96,12 +90,10 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             row["_dt_obj"] = msg_ts.date()
             row["_raw_dt"] = msg_ts
             
-            # --- CRITICAL: Extract and Clean Sender Info ---
             sender = "Unknown Number"
             s_match = re.search(r'^(?:\]|,|-)?\s*([^:\n🚨]+):', record)
             if s_match: 
                 sender = s_match.group(1).strip()
-                # Remove sender header completely so phone numbers don't bleed into parameter fields!
                 record_body = record[s_match.end():].strip()
             else:
                 record_body = record.strip()
@@ -112,7 +104,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
 
             text_lower = record_body.lower()
 
-            # --- Extract Quantities ---
             b_match = re.search(r'(\d+)(?:st|nd|rd|th)?\s*(?:billet|bullet|bilet|billete)', text_lower)
             if not b_match:
                 b_match = re.search(r'(?:billet|bullet|bilet|billete)[^\d\n]*(\d+)', text_lower)
@@ -128,7 +119,6 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
                 if val.lower() not in ['bar', 'c', 'mm', 'omitted', 'attached']:
                     row["Size Details"] = val.title()
             
-            # --- Technical Metrics ---
             row["Mill Speed m/s"] = get_num(r'sp[e]{1,2}d', record_body)
             row["Flow Rate m3"] = get_num(r'(?:fl[o]{1,2}w|f[o]{1,2}ll[o]{1,2}w|fl[i]{1,2}w|follow)', record_body)
             row["FCV%"] = get_num(r'fcv', record_body)
@@ -146,14 +136,13 @@ def parse_whatsapp_data(text_content, sender_mapping, is_dayfirst_input, is_dayf
             if pump_match:
                 row["Pumps in Operation"] = pump_match.group(1).strip()
 
-            # --- Temperatures ---
             row["After WHF Temp."] = get_num(r'(?:after|afr)\s*whf', record_body)
-            row["WHF Exit Temp At Stand 1 Entry"] = get_num(r'(?:stand|stnd|stad)\s*1', record_body)
+            # Updated to support both "Stand 1" and "Stand entry" without needing the '1'
+            row["WHF Exit Temp At Stand 1 Entry"] = get_num(r'(?:stand|stnd|stad)(?:\s*1|\s*entry)?', record_body) 
             row["Bar Temp. Before PQS"] = get_num(r'before\s*pqs', record_body)
             row["Bar Temp at Cooling Bed"] = get_num(r'(?:cooling|coling|c\.?b\.?)', record_body)
             row["PQS Water Temperature"] = get_num(r'(?:water|watr)\s*temp', record_body)
 
-            # --- Pressures (Handles Labeled and Naked Vertical lists) ---
             found_labeled = False
             for p_idx in range(1, 7):
                 p_match = re.search(rf'(?:\*|\b){p_idx}\s*#\s*\*?\s*(?:->|\u2192|→|:)*\s*(\d+(?:\.\d+)?)', record_body, re.IGNORECASE)
@@ -260,7 +249,6 @@ if uploaded_file is not None:
 
         df_chrono = filtered_df.sort_values('_raw_dt', ascending=True).reset_index(drop=True)
         
-        # Sequentially progressive logic for sample numbers (calculated dynamically post-filter)
         current_sample_no = 1
         sample_nos = []
         for idx, row in df_chrono.iterrows():
